@@ -1,0 +1,123 @@
+# .github/workflows/scrape.yml
+#
+# Per-market scraper workflow - injected into each market repo by deploy/deploy.py.
+# 20 3,7,11,15,19,23 * * * / PAGUEMENOS are replaced per market.
+#
+# Secrets required in each market repo (set automatically by deploy.py):
+#   STORE_KEY               - e.g. "atacadao"
+#   DATABASE_URL_{MARKET}   - e.g. DATABASE_URL_ATACADAO (Neon)
+#   SCRAPE_ZIP_CODE         - optional; one CEP or a comma-separated list (one store per CEP
+#                             for per-store markets, see config.STORES[..]["per_store"])
+
+name: Scrape
+
+# GitHub disables a scheduled workflow after 60 days with no repository activity, and a
+# schedule firing does not count as activity. These repos only write to Neon, so nothing
+# commits to them after a deploy. The "Keep-alive commit" step below fixes that, and needs
+# write access because the default GITHUB_TOKEN is read-only here.
+permissions:
+  contents: write
+
+concurrency:
+  group: scrape
+  cancel-in-progress: false
+
+on:
+  schedule:
+    - cron: '20 3,7,11,15,19,23 * * *'
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max products to scrape (empty = no limit)"
+        required: false
+        default: ""
+      zip_code:
+        description: "CEP override (comma-separated list = one store per CEP)"
+        required: false
+        default: ""
+      skip_enrich:
+        description: "Skip barcode enrichment"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      probe:
+        description: "Run the market's endpoint diagnostics instead of scraping"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      force_keepalive:
+        description: "Push the keep-alive commit now, even if a recent commit exists (test)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create .env from secrets
+        # Reference each secret explicitly (never dump the whole secrets context).
+        shell: bash
+        env:
+          STORE_DB_URL:    ${{ secrets.DATABASE_URL_PAGUEMENOS }}
+          SCRAPE_ZIP_CODE: ${{ secrets.SCRAPE_ZIP_CODE }}
+        run: |
+          {
+            printf 'DATABASE_URL_PAGUEMENOS=%s\n' "$STORE_DB_URL"
+            if [ -n "$SCRAPE_ZIP_CODE" ]; then printf 'SCRAPE_ZIP_CODE=%s\n' "$SCRAPE_ZIP_CODE"; fi
+          } > .env
+          echo "Created .env for PAGUEMENOS"
+
+      - name: Run scraper
+        run: |
+          STORE="${{ secrets.STORE_KEY }}"
+          ARGS="--stores $STORE --log --post"
+          if [ "${{ inputs.skip_enrich }}" = "true" ]; then ARGS="$ARGS --skip-enrich"; fi
+          if [ -n "${{ inputs.limit }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
+          if [ -n "${{ inputs.zip_code }}" ]; then ARGS="$ARGS --zip ${{ inputs.zip_code }}"; fi
+          if [ "${{ inputs.probe }}" = "true" ]; then ARGS="$ARGS --probe"; fi
+          python -m main $ARGS
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs
+          path: logs/
+          retention-days: 7
+
+      - name: Keep-alive commit
+        # Runs whatever the scrape outcome was. Commits only when the newest commit is over
+        # 30 days old, so each repo gets about one commit a month instead of one per run.
+        # A push that fails turns the run red and the next run tries again.
+        if: always()
+        shell: bash
+        run: |
+          age_days=$(( ( $(date +%s) - $(git log -1 --format=%ct) ) / 86400 ))
+          echo "Newest commit is $age_days days old"
+          if [ "$age_days" -lt 30 ] && [ "${{ inputs.force_keepalive }}" != "true" ]; then
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > .last_run
+          git add .last_run
+          git commit -m "chore: keep-alive (prevents GitHub's 60-day inactivity auto-disable)"
+          git push

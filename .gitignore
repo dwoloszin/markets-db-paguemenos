@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+.env.*
+!.env.template
+
+# Runtime output
+logs/
+*.log
+exports/
+*.csv
+*.xlsx
+.cache/
+
+# Local notes / scratch
+README_LOCAL.md
+.claude/
+_*.py
+*.bak-*
+
+# Old disaster-recovery manifests (contain passwords) - never commit
+deploy/disaster_recovery/

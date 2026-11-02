@@ -1,0 +1,102 @@
+"""
+config.py - Non-secret configuration + the market registry.
+
+RULE: secrets (DATABASE_URL_*, tokens) live ONLY in .env / GitHub secrets.
+Everything else is a plain value here.
+
+The registry below is the single source of truth used by:
+  * main.py            -> which subprocess to launch per market
+  * db/db_manager.py   -> which DATABASE_URL_* env var each market uses
+  * deploy/deploy.py   -> per-market GitHub repo + cron schedule
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Dict, List, Optional
+
+# ZIP (CEP) used to pick the physical store for every market.
+# Override per run with SCRAPE_ZIP_CODE=... or `--zip`.
+#   zona norte 02401-100 | zona sul 04646-000 | zona leste 08032-230 | zona oeste 06290-170
+SCRAPE_ZIP_CODE: str = (os.getenv("SCRAPE_ZIP_CODE") or "08032-230").strip().split(",")[0].strip()
+
+# Several CEPs = several stores for the markets whose prices depend on the store
+# (STORES[..]["per_store"]). Comma-separated in SCRAPE_ZIP_CODES (or SCRAPE_ZIP_CODE),
+# or `--zip "08032-230,04646-000"`. National-price markets run once whatever the list.
+SCRAPE_ZIP_CODES: List[str] = [
+    z.strip() for z in (os.getenv("SCRAPE_ZIP_CODES") or os.getenv("SCRAPE_ZIP_CODE") or "08032-230").split(",") if z.strip()
+]
+
+# Rows whose barcode enrichment returned "not found" are retried after this many days.
+BARCODE_RETRY_NOT_FOUND_DAYS: int = 14
+
+# price_history rows older than this are pruned (keeps Neon under the free-tier size).
+PRICE_HISTORY_KEEP_DAYS: int = 180
+
+# Offers not refreshed for this many hours are flipped to is_available=false.
+STALE_HOURS: int = 48
+
+
+def _int_env(key: str, default: Optional[int]) -> Optional[int]:
+    raw = (os.getenv(key) or "").strip()
+    if not raw:
+        return default
+    try:
+        val = int(raw)
+    except ValueError:
+        return default
+    return val if val > 0 else None
+
+
+SCRAPE_LIMIT: Optional[int] = _int_env("SCRAPE_LIMIT", None)
+
+
+# ---------------------------------------------------------------------------
+# Market registry
+#   key        : store key (folder name under markets/, CLI name, repo suffix)
+#   name       : display name
+#   db_env     : DATABASE_URL_* variable (one Neon project per market)
+#   enrich     : True when the market has an enrich_ean_<key>.py step
+#   barcode    : where barcodes come from (documentation only)
+#   per_store  : True when prices depend on the store chosen for the CEP -> scraped once per
+#                CEP in SCRAPE_ZIP_CODES (store_id differs); False = national prices, one run
+#   group      : markets sharing a backend/WAF run one at a time
+#   cron       : UTC schedule used by deploy/deploy.py - every 4 h, one market
+#                starting every 15 min so no two markets run at the same time
+# ---------------------------------------------------------------------------
+STORES: Dict[str, Dict[str, object]] = {
+    "swift":          {"name": "Swift",           "db_env": "DATABASE_URL_SWIFT",          "enrich": False, "per_store": False, "barcode": "inline (VTEX ean)",                    "group": None,     "cron": "45 3,7,11,15,19,23 * * *"},
+    "giga":           {"name": "Giga",            "db_env": "DATABASE_URL_GIGA",           "enrich": False, "per_store": False, "barcode": "inline (VTEX ean)",                    "group": None,     "cron": "45 1,5,9,13,17,21 * * *"},
+    "davo":           {"name": "Davo",            "db_env": "DATABASE_URL_DAVO",           "enrich": False, "per_store": False, "barcode": "inline (VipCommerce codigo_barras)",   "group": "vipcommerce", "cron": "0 3,7,11,15,19,23 * * *"},
+    "samsclub":       {"name": "Sam's Club",      "db_env": "DATABASE_URL_SAMSCLUB",       "enrich": False, "per_store": False, "barcode": "inline (VTEX ean)",                    "group": None,     "cron": "0 2,6,10,14,18,22 * * *"},
+    "oba":            {"name": "Oba Hortifruti",  "db_env": "DATABASE_URL_OBA",            "enrich": False, "per_store": False, "barcode": "inline (VTEX ean, ~60%)",              "group": None,     "cron": "30 2,6,10,14,18,22 * * *"},
+    "rossi":          {"name": "Rossi",           "db_env": "DATABASE_URL_ROSSI",          "enrich": False, "per_store": False, "barcode": "inline (VipCommerce codigo_barras)",   "group": "vipcommerce", "cron": "15 1,5,9,13,17,21 * * *"},
+    "tenda":          {"name": "Tenda Atacado",   "db_env": "DATABASE_URL_TENDA",          "enrich": False, "per_store": False, "barcode": "inline (API barcode)",                 "group": None,     "cron": "15 2,6,10,14,18,22 * * *"},
+    "xsupermercados": {"name": "XSupermercados",  "db_env": "DATABASE_URL_XSUPERMERCADOS", "enrich": False, "per_store": False, "barcode": "inline (applay material/sku)",         "group": "applay", "cron": "15 3,7,11,15,19,23 * * *"},
+    "barbosa":        {"name": "Barbosa",         "db_env": "DATABASE_URL_BARBOSA",        "enrich": False, "per_store": False, "barcode": "inline (applay material/sku)",         "group": "applay", "cron": "45 2,6,10,14,18,22 * * *"},
+    "atacadao":       {"name": "Atacadao",        "db_env": "DATABASE_URL_ATACADAO",       "enrich": True, "per_store": True,  "barcode": "VTEX catalog batch lookup by productId","group": None,     "cron": "0 1,5,9,13,17,21 * * *"},
+    "carrefour":      {"name": "Carrefour",       "db_env": "DATABASE_URL_CARREFOUR",      "enrich": True, "per_store": True,  "barcode": "image file name (GTIN) + PDP JSON-LD", "group": None,     "cron": "30 0,4,8,12,16,20 * * *"},
+    "sonda":          {"name": "Sonda Delivery",  "db_env": "DATABASE_URL_SONDA",          "enrich": True, "per_store": False,  "barcode": "image path (EAN) + PDP JSON-LD gtin",  "group": None,     "cron": "0 0,4,8,12,16,20 * * *"},
+    "extra":          {"name": "Extra",           "db_env": "DATABASE_URL_EXTRA",          "enrich": True, "per_store": False,  "barcode": "PDP HTML \"ean\" (GPA)",               "group": "gpa",    "cron": "30 1,5,9,13,17,21 * * *"},
+    "paodeacucar":    {"name": "Pao de Acucar",   "db_env": "DATABASE_URL_PAODEACUCAR",    "enrich": True, "per_store": False,  "barcode": "PDP HTML \"ean\" (GPA)",               "group": "gpa",    "cron": "45 0,4,8,12,16,20 * * *"},
+    "nagumo":         {"name": "Nagumo",          "db_env": "DATABASE_URL_NAGUMO",         "enrich": False, "per_store": False, "barcode": "legacy/crossfill only (no upc any more)", "group": None,     "cron": "15 0,4,8,12,16,20 * * *"},
+    "higas":          {"name": "Higas",           "db_env": "DATABASE_URL_HIGAS",          "enrich": False, "per_store": True, "barcode": "legacy/crossfill only (API v5 has none)","group": None,   "cron": "30 3,7,11,15,19,23 * * *"},
+    "spani":          {"name": "Spani",           "db_env": "DATABASE_URL_SPANI",          "enrich": False, "per_store": False, "barcode": "inline (VipCommerce codigo_barras)",   "group": "vipcommerce", "cron": "5 3,7,11,15,19,23 * * *"},
+    "hirota":         {"name": "Hirota",          "db_env": "DATABASE_URL_HIROTA",         "enrich": False, "per_store": False, "barcode": "inline (VipCommerce codigo_barras)",   "group": "vipcommerce", "cron": "50 3,7,11,15,19,23 * * *"},
+    "zaffari":        {"name": "Zaffari",         "db_env": "DATABASE_URL_ZAFFARI",        "enrich": False, "per_store": False, "barcode": "inline (VTEX ean)",                    "group": None,     "cron": "50 1,5,9,13,17,21 * * *"},
+    "marche":         {"name": "St. Marche",      "db_env": "DATABASE_URL_MARCHE",         "enrich": True,  "per_store": False, "barcode": "Shopify product JSON (barcode list)",    "group": None,     "cron": "20 1,5,9,13,17,21 * * *"},
+    "coop":           {"name": "Coop",            "db_env": "DATABASE_URL_COOP",           "enrich": False, "per_store": True,  "barcode": "inline (VTEX ean)",                    "group": None,     "cron": "5 2,6,10,14,18,22 * * *"},
+    "violeta":        {"name": "Violeta Express", "db_env": "DATABASE_URL_VIOLETA",        "enrich": False, "per_store": False, "barcode": "inline (VipCommerce codigo_barras)",   "group": "vipcommerce", "cron": "20 2,6,10,14,18,22 * * *"},
+    "bergamini":      {"name": "Hiper Bergamini", "db_env": "DATABASE_URL_BERGAMINI",      "enrich": False, "per_store": False, "barcode": "inline (VipCommerce codigo_barras)",   "group": "vipcommerce", "cron": "35 2,6,10,14,18,22 * * *"},
+    "master":         {"name": "Master Supermercados", "db_env": "DATABASE_URL_MASTER",    "enrich": False, "per_store": False, "barcode": "inline (VipCommerce codigo_barras)",   "group": "vipcommerce", "cron": "20 0,4,8,12,16,20 * * *"},
+    "mambo":          {"name": "Mambo",           "db_env": "DATABASE_URL_MAMBO",          "enrich": False, "per_store": False, "barcode": "inline (VTEX ean)",                    "group": None,     "cron": "50 0,4,8,12,16,20 * * *"},
+    "santaluzia":     {"name": "Casa Santa Luzia", "db_env": "DATABASE_URL_SANTALUZIA",    "enrich": False, "per_store": False, "barcode": "inline (VTEX ean, GTIN-8 allowed)",    "group": None,     "cron": "5 1,5,9,13,17,21 * * *"},
+    "paguemenos":     {"name": "Super Pague Menos", "db_env": "DATABASE_URL_PAGUEMENOS",   "enrich": False, "per_store": False, "barcode": "inline (VTEX ean)",                    "group": None,     "cron": "20 3,7,11,15,19,23 * * *"},
+}
+
+
+def store_meta(key: str) -> Dict[str, object]:
+    try:
+        return STORES[key]
+    except KeyError:
+        raise KeyError(f"unknown store '{key}'. Known: {', '.join(STORES)}") from None
